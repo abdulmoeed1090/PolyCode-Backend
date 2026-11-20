@@ -1,5 +1,7 @@
 const DEFAULT_POLYMENTOR_API_URL = "https://poly-mentor-bm2s.vercel.app";
+
 const MAX_POLYMENTOR_MESSAGE_CHARS = 8000;
+const POLYMENTOR_TIMEOUT_MS = 30000;
 
 function getPolyMentorConfig() {
   const baseUrl = (
@@ -12,7 +14,9 @@ function getPolyMentorConfig() {
 
   return {
     chatUrl: `${baseUrl}/chat`,
-    level: (process.env.POLYMENTOR_LEVEL || "beginner").trim().toLowerCase(),
+    level: (process.env.POLYMENTOR_LEVEL || "beginner")
+      .trim()
+      .toLowerCase(),
   };
 }
 
@@ -31,7 +35,10 @@ function compactMessagesForPolyMentor(messages = []) {
   const conversation = messages
     .filter((message) => message.role !== "system" && message.content)
     .slice(-8);
-  const latestUser = [...conversation].reverse().find((message) => message.role === "user");
+
+  const latestUser = [...conversation]
+    .reverse()
+    .find((message) => message.role === "user");
 
   if (!latestUser?.content) {
     return "";
@@ -40,18 +47,24 @@ function compactMessagesForPolyMentor(messages = []) {
   const priorConversation = conversation
     .slice(0, -1)
     .map((message) => {
-      const label = message.role === "assistant" ? "Assistant" : "User";
+      const label =
+        message.role === "assistant" ? "Assistant" : "User";
+
       return `${label}: ${message.content.trim()}`;
     })
     .join("\n");
 
   const promptParts = [
     systemText ? `PolyCode context:\n${systemText}` : "",
-    priorConversation ? `Recent conversation:\n${priorConversation}` : "",
+    priorConversation
+      ? `Recent conversation:\n${priorConversation}`
+      : "",
     `Current question:\n${latestUser.content.trim()}`,
   ].filter(Boolean);
 
-  return promptParts.join("\n\n").slice(0, MAX_POLYMENTOR_MESSAGE_CHARS);
+  return promptParts
+    .join("\n\n")
+    .slice(0, MAX_POLYMENTOR_MESSAGE_CHARS);
 }
 
 async function generateAssistantReply(messages, options = {}) {
@@ -65,17 +78,47 @@ async function generateAssistantReply(messages, options = {}) {
     throw error;
   }
 
-  const response = await fetch(chatUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      message,
-      level,
-    }),
-  });
+  
+  const controller = new AbortController();
 
-  const text = await response.text();
+  const timeoutId = setTimeout(() => {
+    controller.abort();
+  }, POLYMENTOR_TIMEOUT_MS);
+
+  let response;
+  let text;
+
+  try {
+    response = await fetch(chatUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message,
+        level,
+      }),
+      signal: controller.signal,
+    });
+
+    text = await response.text();
+  } catch (error) {
+    if (controller.signal.aborted) {
+      const timeoutError = new Error(
+        "PolyMentor service timed out after 30 seconds."
+      );
+
+      timeoutError.statusCode = 504;
+      timeoutError.code = "POLYMENTOR_TIMEOUT";
+
+      throw timeoutError;
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
   let data = {};
+
   if (text) {
     try {
       data = JSON.parse(text);
@@ -86,18 +129,28 @@ async function generateAssistantReply(messages, options = {}) {
 
   if (!response.ok) {
     const error = new Error(
-      data.error || data.detail || data.message || "PolyMentor service failed.",
+      data.error ||
+        data.detail ||
+        data.message ||
+        "PolyMentor service failed."
     );
+
     error.statusCode = response.status;
     error.code = "POLYMENTOR_API_ERROR";
+
     throw error;
   }
 
   const answer = data.answer || data.response || data.message;
+
   if (!answer) {
-    const error = new Error("PolyMentor returned an empty response.");
+    const error = new Error(
+      "PolyMentor returned an empty response."
+    );
+
     error.statusCode = 502;
     error.code = "POLYMENTOR_EMPTY_RESPONSE";
+
     throw error;
   }
 
